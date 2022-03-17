@@ -12,7 +12,7 @@
  */
 
 //*********************  VERSION NUMBER   ***********************************
-const char*   kVersion = " 1.5";
+const char*   kVersion = " 1.6c";
 
 // Digital and analog I/O
 #define IN_SWITCH_CLEAR 2
@@ -137,7 +137,14 @@ volatile char f_wdt=1;
 
 // My offset from the standard millis() result. This tracks time spent in sleep mode
 // We wake from sleep using Watchdog Timer, whereas millis() uses Timer0 which stops during sleep
+// No longer used since tick-counting timing impelemented
 volatile unsigned long millisOffset;
+
+// Converting ticks to milliseconds
+const unsigned short millisPerTick = 137;
+//const unsigned short microsPerTick = 72;
+volatile unsigned long millisCounter;
+//volatile unsigned microsCounter;
 
 // Counting individual sleeps, for more steady flashing
 volatile unsigned long sleepTicks;
@@ -150,11 +157,12 @@ const unsigned short redBlinkOnTicks = 3;      // 3 ticks (=0.375 second) blink 
 // Watchdog Timer Control Register values for prescaler (section 10.9.2 in ATmega328P data sheet)
 // All other bits in WDTCSR should be zero when writing the prescaler bits
 // (See the manual or setup() code to see what you have to do prior to writing the bits)
-#define WDTCSR_PRE_16ms   0b000000
-#define WDTCSR_PRE_32ms   0b000001
-#define WDTCSR_PRE_64ms   0b000010
-#define WDTCSR_PRE_125ms  0b000011
-#define WDTCSR_PRE_p25s   0b000100
+// Note that the timings in the constant names are approximate. Actual values are powers of 2 of microseconds
+#define WDTCSR_PRE_16ms   0b000000  // 16384 us
+#define WDTCSR_PRE_32ms   0b000001  // 32768 us
+#define WDTCSR_PRE_64ms   0b000010  // 65536 us
+#define WDTCSR_PRE_128ms  0b000011  // 131072 us
+#define WDTCSR_PRE_256ms  0b000100
 #define WDTCSR_PRE_p5     0b000101
 #define WDTCSR_PRE_1s     0b000110
 #define WDTCSR_PRE_2s     0b000111
@@ -220,6 +228,8 @@ void setup() {
   programSwitchTimeout = 0;
 
   millisOffset = 0;
+  millisCounter = 0;
+//  microsCounter = 0;
   sleepTicks = 0;
   
   noInterrupts();
@@ -248,10 +258,6 @@ void setup() {
   //e. Clear the Timer/Counter2 interrupt flags
   TIFR2 = 0x07;
 
-  //f. Enable interrupts, if needed
-  // TIMSK2 |= (1 << TOIE2);
-  interrupts();
-
   /*** Setup the Watchdog Timer ***/
   
   /* Clear the reset flag. */
@@ -264,12 +270,16 @@ void setup() {
 
   /* set new watchdog timeout prescaler value */
   //WDTCSR = 1<<WDP1 | 1<<WDP2; /* 1.0 seconds */
-  WDTCSR = WDTCSR_PRE_125ms;       // Be sure to keep this in sync with myMillis offset jump if you change it
+  WDTCSR = WDTCSR_PRE_128ms;       
   
   /* Enable the WD interrupt (note no reset). */
   WDTCSR |= _BV(WDIE);
 
-  // Get the saved values of timeouts
+  //f. Enable interrupts, if needed
+  // TIMSK2 |= (1 << TOIE2);
+  interrupts();
+
+  // Get the saved values of timeouts from EEPROM
   EEPROM.get( kMaxPumpTimeAddress, maxPumpTime );
   EEPROM.get( kMinWaitTimeAddress, minWaitTime );
   
@@ -340,6 +350,11 @@ void pumpRequest( void )
  * From https://donalmorrissey.blogspot.com/2010/04/sleeping-arduino-part-5-wake-up-via.html
  * Archived at https://web.archive.org/web/20210506142954/https://donalmorrissey.blogspot.com/2010/04/sleeping-arduino-part-5-wake-up-via.html
  * 
+ * In addition, I count the number of ticks to track milliseconds. It's only good to ~1% over the typical summertime
+ * temperature range in Maine, but that's probably good enough, and it lets me use POWER DOWN mode for minimum power draw.
+ * We also collect the ms counter value when awakening, so that we actually have a globally 
+ * monotonic value for myMillis within one watchdog tick.
+ * 
  *
  ***************************************************/
 ISR(WDT_vect)
@@ -347,6 +362,16 @@ ISR(WDT_vect)
   if(f_wdt == 0)
   {
     f_wdt=1;
+    millisCounter += millisPerTick;
+//    microsCounter += microsPerTick;
+
+//    if( microsCounter >= 1000 )
+//    {
+//      millisCounter += microsCounter / 1000;
+//      microsCounter = microsCounter % 1000;
+//    }
+      
+    millisOffset = millis();
   }
   else
   {
@@ -370,11 +395,11 @@ void enterSleep(void)
   /* 
    *  EDIT: could also use SLEEP_MODE_PWR_DOWN for lowest power consumption. 
    */
-  static unsigned long  wokeMillis;
-  unsigned long         elapsedMillis;
-  unsigned long         lostMillis;
+//  static unsigned long  wokeMillis;
+//  unsigned long         elapsedMillis;
+//  unsigned long         lostMillis;
   
-  set_sleep_mode(SLEEP_MODE_PWR_SAVE);   
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);   
   sleep_enable();
   
   /* 
@@ -383,23 +408,23 @@ void enterSleep(void)
    *  The watchdog timer will wake us at the next 125 ms boundary.
    *  Immediately read the ms counter when that happens
    */
-  elapsedMillis = millis() - wokeMillis;      // Number of ms we've been awake. 
+//  elapsedMillis = millis() - wokeMillis;      // Number of ms we've been awake. 
   sleep_mode();                               // Here's the actual call where we sleep
-  wokeMillis = millis();                      // Remember this until the next call to enterSleep
+//  wokeMillis = millis();                      // Remember this until the next call to enterSleep
 
   /* 
    *  Calculate milliseconds lost while sleeping.
    *  I definitely don't understand why the fudge (+19) is needed!
    *  This could be calculated before we sleep, just putting it here to reduce # of cycles between millis() call and sleep
    */
-  lostMillis = 19                           // Fudge correction, determined empirically but totally not understood
-              + 125                         // We will be asleep for 125 milliseconds (the watchdog tick period)...
-              - ( elapsedMillis % 125 );    //  minus the fraction of that sleep tick period since the last increment of millis()
+//  lostMillis = 19                           // Fudge correction, determined empirically but totally not understood
+//              + 125                         // We will be asleep for 125 milliseconds (the watchdog tick period)...
+//              - ( elapsedMillis % 125 );    //  minus the fraction of that sleep tick period since the last increment of millis()
 
   sleep_disable(); /* First thing to do is disable sleep. */
 
   // Increase the offset by the amount of time we were asleep
-  millisOffset += lostMillis;
+//  millisOffset += lostMillis;
 
   // Count the sleep
   sleepTicks += 1;
@@ -425,16 +450,20 @@ void enterSleep(void)
 unsigned long myMillis(void)
 {
   unsigned long mm;
+
+  mm = millis() - millisOffset;
+  return millisCounter + mm;
   
-  mm = millis();
-  mm += millisOffset;
-  return mm;
+//  mm = millis();
+//  mm += millisOffset;
+//  return mm;
 }
 
 
 void loop() {
   // put your main code here, to run repeatedly:
- 
+
+
   // If we're not in program mode, go to power-save for a second before doing whatever else we're doing.
   if( state != st_program )
   {
