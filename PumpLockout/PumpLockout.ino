@@ -8,11 +8,13 @@
 /* 
  *  TODO:
  *  
- *  Rewrite delay so it is hidden in the countdown
+ *  Rewrite delay so it is hidden in the countdown?
+ *  Switch to timing using Timer2 and external clock?
+ *  Check power draw
  */
 
 //*********************  VERSION NUMBER   ***********************************
-const char*   kVersion = " 1.6c";
+const char*   kVersion = " 1.6J";
 
 // Digital and analog I/O
 #define IN_SWITCH_CLEAR 2
@@ -133,18 +135,12 @@ volatile boolean  pumpRequested;
 SevenSegment lcd(LCD_CLOCK, LCD_DATA, LCD_LOAD);
 
 /*********************   Sleep stuff    ***************************/
-volatile char f_wdt=1;
-
-// My offset from the standard millis() result. This tracks time spent in sleep mode
-// We wake from sleep using Watchdog Timer, whereas millis() uses Timer0 which stops during sleep
-// No longer used since tick-counting timing impelemented
-volatile unsigned long millisOffset;
+volatile char f_wdt=1;  // watchdog overflow detection, which is just ignored.
 
 // Converting ticks to milliseconds
-const unsigned short millisPerTick = 137;
-//const unsigned short microsPerTick = 72;
+const unsigned short millisPerTick = 136;   // Assumes Watchdog prescaler set to WDTCSR_PRE_125ms
 volatile unsigned long millisCounter;
-//volatile unsigned microsCounter;
+volatile unsigned long millisOffset;
 
 // Counting individual sleeps, for more steady flashing
 volatile unsigned long sleepTicks;
@@ -157,12 +153,14 @@ const unsigned short redBlinkOnTicks = 3;      // 3 ticks (=0.375 second) blink 
 // Watchdog Timer Control Register values for prescaler (section 10.9.2 in ATmega328P data sheet)
 // All other bits in WDTCSR should be zero when writing the prescaler bits
 // (See the manual or setup() code to see what you have to do prior to writing the bits)
-// Note that the timings in the constant names are approximate. Actual values are powers of 2 of microseconds
-#define WDTCSR_PRE_16ms   0b000000  // 16384 us
-#define WDTCSR_PRE_32ms   0b000001  // 32768 us
-#define WDTCSR_PRE_64ms   0b000010  // 65536 us
-#define WDTCSR_PRE_128ms  0b000011  // 131072 us
-#define WDTCSR_PRE_256ms  0b000100
+// Note that the timings in the constant names assume a 125 kHz oscillator, but according
+// to the graph of oscillator frequency vs temperature and voltage, it's more like 119 kHz,
+// so for instance  the "125ms" constant gives a period of 137 ms at 20°C and 5 V.
+#define WDTCSR_PRE_16ms   0b000000
+#define WDTCSR_PRE_32ms   0b000001
+#define WDTCSR_PRE_63ms   0b000010
+#define WDTCSR_PRE_125ms  0b000011
+#define WDTCSR_PRE_250ms  0b000100
 #define WDTCSR_PRE_p5     0b000101
 #define WDTCSR_PRE_1s     0b000110
 #define WDTCSR_PRE_2s     0b000111
@@ -229,7 +227,6 @@ void setup() {
 
   millisOffset = 0;
   millisCounter = 0;
-//  microsCounter = 0;
   sleepTicks = 0;
   
   noInterrupts();
@@ -270,7 +267,7 @@ void setup() {
 
   /* set new watchdog timeout prescaler value */
   //WDTCSR = 1<<WDP1 | 1<<WDP2; /* 1.0 seconds */
-  WDTCSR = WDTCSR_PRE_128ms;       
+  WDTCSR = WDTCSR_PRE_125ms;       
   
   /* Enable the WD interrupt (note no reset). */
   WDTCSR |= _BV(WDIE);
@@ -289,15 +286,15 @@ void setup() {
 
 
   // Leave segment test there for a while
-  delay( 600 );
+  delay( 800 );
   lcd.print( "PLOP" );
 
   // Leave splash screen up for a while
-  delay( 1500 );
+  delay( 1300 );
 
   // Display version number
   lcd.print( kVersion );
-  delay( 1500 );
+  delay( 1300 );
   setState( st_ready );
 
 }
@@ -363,13 +360,6 @@ ISR(WDT_vect)
   {
     f_wdt=1;
     millisCounter += millisPerTick;
-//    microsCounter += microsPerTick;
-
-//    if( microsCounter >= 1000 )
-//    {
-//      millisCounter += microsCounter / 1000;
-//      microsCounter = microsCounter % 1000;
-//    }
       
     millisOffset = millis();
   }
@@ -393,40 +383,22 @@ ISR(WDT_vect)
 void enterSleep(void)
 {
   /* 
-   *  EDIT: could also use SLEEP_MODE_PWR_DOWN for lowest power consumption. 
+   *  Now using SLEEP_MODE_PWR_DOWN for lowest power consumption. 
    */
-//  static unsigned long  wokeMillis;
-//  unsigned long         elapsedMillis;
-//  unsigned long         lostMillis;
   
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);   
   sleep_enable();
   
-  /* 
-   *  Collect the millisecond counter, calculate the number of ms we've been awake, 
-   *  go to sleep
-   *  The watchdog timer will wake us at the next 125 ms boundary.
-   *  Immediately read the ms counter when that happens
-   */
-//  elapsedMillis = millis() - wokeMillis;      // Number of ms we've been awake. 
   sleep_mode();                               // Here's the actual call where we sleep
-//  wokeMillis = millis();                      // Remember this until the next call to enterSleep
 
-  /* 
-   *  Calculate milliseconds lost while sleeping.
-   *  I definitely don't understand why the fudge (+19) is needed!
-   *  This could be calculated before we sleep, just putting it here to reduce # of cycles between millis() call and sleep
+  /*
+   * Wake back up.
+   * First thing to do is disable sleep. 
    */
-//  lostMillis = 19                           // Fudge correction, determined empirically but totally not understood
-//              + 125                         // We will be asleep for 125 milliseconds (the watchdog tick period)...
-//              - ( elapsedMillis % 125 );    //  minus the fraction of that sleep tick period since the last increment of millis()
+  sleep_disable();
 
-  sleep_disable(); /* First thing to do is disable sleep. */
 
-  // Increase the offset by the amount of time we were asleep
-//  millisOffset += lostMillis;
-
-  // Count the sleep
+  // Count the sleep tick for flashing the red light
   sleepTicks += 1;
   blinkTicks += 1;
   
@@ -444,7 +416,9 @@ void enterSleep(void)
  *  Description: Because we sleep in power-save (or possibly power-down) mode, timer0,
  *                which is used by the system millis(), is disabled during sleep.
  *                This function provides a corrected version that should track
- *                true elapsed time.
+ *                true elapsed time. Works by counting ticks from the watchdog timer.
+ *                Which is not particularly accurate, but should be better than 1%, and
+ *                provides lower power draw than using POWER_SAVE mode.
  *
  ***************************************************/
 unsigned long myMillis(void)
@@ -453,17 +427,10 @@ unsigned long myMillis(void)
 
   mm = millis() - millisOffset;
   return millisCounter + mm;
-  
-//  mm = millis();
-//  mm += millisOffset;
-//  return mm;
 }
 
 
 void loop() {
-  // put your main code here, to run repeatedly:
-
-
   // If we're not in program mode, go to power-save for a second before doing whatever else we're doing.
   if( state != st_program )
   {
@@ -557,8 +524,8 @@ void loop() {
       digitalWrite( LED_WAIT, LOW );
       digitalWrite( LED_LOCKOUT, LOW );
       timeRemainingInMode = maxPumpTime;
-      msAtLastDecrement = myMillis();
-      printToLCD( timeRemainingInMode, printStyle_MMSS );
+      msAtLastDecrement = myMillis() - 1000;
+      //printToLCD( timeRemainingInMode, printStyle_MMSS );
 
       // Wait for pump to start drawing current so the pump-done detector doesn't fire immediately
       delay( 500 );
@@ -582,7 +549,7 @@ void loop() {
         digitalWrite( LED_LOCKOUT, HIGH );
       }
       timeRemainingInMode = kDecayTime;
-      msAtLastDecrement = myMillis();
+      msAtLastDecrement = myMillis() - 1000;
       printToLCD( timeRemainingInMode, printStyle_secs );
       break;
       
@@ -593,10 +560,10 @@ void loop() {
       digitalWrite( LED_WAIT, HIGH );
       digitalWrite( LED_LOCKOUT, LOW );
       timeRemainingInMode = minWaitTime;
-      msAtLastDecrement = myMillis();
+      msAtLastDecrement = myMillis() - 1000;
       pumpRequested = false;
       clearSwitchPushed = false;
-      printToLCD( timeRemainingInMode, printStyle_HHMM );
+      //printToLCD( timeRemainingInMode, printStyle_HHMM );
       break;
       
     case st_lockout:
@@ -606,10 +573,10 @@ void loop() {
       digitalWrite( LED_WAIT, LOW );
       digitalWrite( LED_LOCKOUT, HIGH );
       timeRemainingInMode = 0;          // We count up in lockout mode
-      msAtLastDecrement = myMillis();
+      msAtLastDecrement = myMillis() - 1000;
       blinkTicks = 0;
       clearSwitchPushed = false;
-      printToLCD( timeRemainingInMode, printStyle_HHMM );
+      //printToLCD( timeRemainingInMode, printStyle_HHMM );
       break;
             
     case st_program:
@@ -1119,14 +1086,18 @@ void printToLCD( unsigned long value, printStyle_t printStyle )
   unsigned long left;
   unsigned long right;
 
-  // Add one to the value so we don't sit on 00:00 for a second
-  value += 1;
-  
   if( printStyle_HHMM == printStyle )
   {
     value /= 60;
   }
 
+  if( state != st_program && state != st_lockout )
+  {
+    // Add one to the value so we don't sit on 00:00 for a second
+    // Don't do it if we're programming, or if we're counting up (lockout mode)
+    value += 1;
+  }
+  
   left = value / 60;
   right = value % 60;
 
