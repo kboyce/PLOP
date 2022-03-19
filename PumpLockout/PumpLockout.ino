@@ -14,7 +14,7 @@
  */
 
 //*********************  VERSION NUMBER   ***********************************
-const char*   kVersion = " 1.6J";
+const char*   kVersion = " 1.6L";
 
 // Digital and analog I/O
 #define IN_SWITCH_CLEAR 2
@@ -138,7 +138,7 @@ SevenSegment lcd(LCD_CLOCK, LCD_DATA, LCD_LOAD);
 volatile char f_wdt=1;  // watchdog overflow detection, which is just ignored.
 
 // Converting ticks to milliseconds
-const unsigned short millisPerTick = 136;   // Assumes Watchdog prescaler set to WDTCSR_PRE_125ms
+const unsigned short millisPerTick = 138;   // Assumes Watchdog prescaler set to WDTCSR_PRE_125ms
 volatile unsigned long millisCounter;
 volatile unsigned long millisOffset;
 
@@ -205,7 +205,13 @@ void setup() {
   // Set up LCD wiring. AY0438 driver chip. Digit, d.p., digit, colon, dp, digit, dp, digit.
   // See README file from SevenSegment library for more info
   lcd.begin( "AY0438", "8.8|8.8" );
-  lcd.print( "8.8:8.8" );   // Segment test
+
+  // Segment/lamp test
+  lcd.print( "8.8:8.8" );
+
+  digitalWrite( LED_RUN, HIGH );
+  digitalWrite( LED_WAIT, HIGH );
+  digitalWrite( LED_LOCKOUT, HIGH );
   
   Serial.begin(115200);
   Serial.println("Initialising...");
@@ -285,9 +291,13 @@ void setup() {
   delay(100); //Allow for serial print to complete.
 
 
-  // Leave segment test there for a while
+  // Leave segment/lamp test there for a while
   delay( 800 );
   lcd.print( "PLOP" );
+  digitalWrite( LED_RUN, LOW );
+  digitalWrite( LED_WAIT, LOW );
+  digitalWrite( LED_LOCKOUT, LOW );
+
 
   // Leave splash screen up for a while
   delay( 1300 );
