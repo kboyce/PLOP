@@ -14,7 +14,7 @@
  */
 
 //*********************  VERSION NUMBER   ***********************************
-const char*   kVersion = " 1.6L";
+const char*   kVersion = " 1.6";
 
 // Digital and analog I/O
 #define IN_SWITCH_CLEAR 2
